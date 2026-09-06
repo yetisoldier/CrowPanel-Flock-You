@@ -89,6 +89,7 @@
 
   // No user LED on this board.
   #define USE_LED               0
+  #define LED_FLASH_MS          120  // referenced at call sites; inert with USE_LED 0
 
   #define MIRROR_SERIAL         0
 
