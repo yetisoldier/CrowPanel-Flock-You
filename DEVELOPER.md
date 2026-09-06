@@ -1,23 +1,32 @@
-# CYD-Flock-You — Developer Documentation
+# CrowPanel-Flock-You — Developer Documentation
 
-Technical documentation for building, modifying, and extending the CYD-Flock-You firmware.
+Technical documentation for building, modifying, and extending the firmware. Same code base runs on the **Elecrow CrowPanel ESP32-S3 Terminal 3.5"** (`env:crowpanel`) and the **Cheap Yellow Display ESP32-2432S028R** (`env:cyd`); `env:xiao_esp32s3` is the headless S3 build.
 
 ---
 
+## Board abstraction (port structure)
+
+Per the port design (`docs/port/bob-port-design.md`, ADR-2):
+
+- `board_config.h` is the **only** place board pins/dimensions/touch type live. It defines `FY_UI_BUILD` (1 for CYD and CrowPanel, 0 headless), `FY_TOUCH_XPT2046_BITBANG` (CYD) or `FY_TOUCH_FT6236_I2C` (CrowPanel), plus per-board pin maps.
+- Shared feature code (display/GPS/SD/BLE-UART state, `dualPrintf` BLE mirroring, detection record hooks, loop ticks) is gated by `FY_UI_BUILD`, not by a board name.
+- Touch is reached only through `boardTouchInit()` / `boardTouchPressed()` / `boardTouchDebug()` — callers never use coordinates, so no calibration is needed.
+- TFT_eSPI stays flag-driven (no `User_Setup.h`); pins/driver come from `platformio.ini` build flags per env.
+- The BLE advertisement name (`CYD-Flock-You`) and protocol version (1) are **wire constants** — identical on every board, required by the shipped `deflock-app`.
+
 ## Architecture Overview
 
-The CYD-Flock-You firmware runs on an ESP32-2432S028R (Cheap Yellow Display) and performs passive WiFi and BLE monitoring for Flock Safety camera signatures. It communicates with the FlockFree Navigation Android app over Bluetooth LE.
+The firmware runs on an ESP32 or ESP32-S3 and performs passive WiFi and BLE monitoring for Flock Safety camera signatures. It communicates with the FlockFree Navigation Android app over Bluetooth LE.
 
 ### Core Modules
 
 ```
-src/
-├── main.cpp                    # Entry point, WiFi/BLE scanning, detection logic, display
-├── display.cpp / display.h     # TFT rendering, screen cycling, FLOCK FOUND flash
-├── ble_uart.cpp / ble_uart.h   # BLE Nordic UART service, JSON line protocol
-├── sd_log.cpp / sd_log.h       # SD card CSV logging
-├── touch.cpp / touch.h         # XPT2046 touchscreen driver
-└── gps.cpp / gps.h             # GPS parsing from phone BLE input
+main.cpp                    # Entry point, WiFi/BLE scanning, detection logic, display,
+                            # board-specific touch/display/SD glue (behind board_config.h)
+board_config.h              # Per-board pin maps, dimensions, touch controller
+platformio.ini              # Board envs: cyd / crowpanel / xiao_esp32s3
+partitions_cyd.csv           # 4MB single-OTA partition table
+partitions_crowpanel.csv    # 8MB dual-OTA partition table
 ```
 
 ### Detection Pipeline
@@ -62,31 +71,35 @@ Detection event via existing JSON path
 
 The project uses PlatformIO for building. Configuration is in `platformio.ini`:
 
-```ini
-[env:cyd]
-platform = espressif32
-board = esp32dev
-framework = arduino
-build_flags = ...
-```
+| Env | Board | Display | Notes |
+|-----|-------|---------|-------|
+| `env:cyd` | `esp32dev` (ESP32-2432S028R) | ILI9341 240×320, HSPI | Original board |
+| `env:crowpanel` | `esp32-s3-devkitc-1` (DLC35020S) | ILI9488 320×480, FSPI | New port; 8MB dual-OTA, qio_opi PSRAM |
+| `env:xiao_esp32s3` | `seeed_xiao_esp32s3` | none | Headless Wi-Fi-only build |
 
 ### Build
 
 ```bash
-pio run -e cyd
+pio run -e crowpanel   # CrowPanel ESP32-S3 Terminal 3.5"
+pio run -e cyd          # Cheap Yellow Display
+pio run -e xiao_esp32s3  # headless S3
+# or all at once:
+pio run -e crowpanel -e cyd -e xiao_esp32s3
 ```
 
 ### Flash
 
-Connect the CYD via USB:
+Connect the board via USB. CrowPanel uses the ESP32-S3's native USB (hold **BOOT**, tap **RST** if needed for download mode):
 
 ```bash
-pio run -e cyd -t upload
+pio run -e crowpanel -t upload   # CrowPanel
+pio run -e cyd -t upload         # CYD
 ```
 
 ### Serial Monitor
 
 ```bash
+pio device monitor -e crowpanel
 pio device monitor -e cyd
 ```
 
@@ -94,17 +107,42 @@ pio device monitor -e cyd
 
 | File | Location | Purpose |
 |------|----------|---------|
-| `firmware.bin` | `.pio/build/cyd/firmware.bin` | Flashable binary (use with `esptool.py`) |
-| `firmware.elf` | `.pio/build/cyd/firmware.elf` | ELF with debug symbols |
-| `firmware.map` | `.pio/build/cyd/firmware.map` | Memory map |
+| `firmware.bin` | `.pio/build/<env>/firmware.bin` | Flashable binary (use with `esptool.py`) |
+| `firmware.elf` | `.pio/build/<env>/firmware.elf` | ELF with debug symbols |
+| `firmware.map` | `.pio/build/<env>/firmware.map` | Memory map |
 
 ### Flash with esptool (alternative)
 
 ```bash
+# CYD: classic ESP32 UART bootloader, offset 0x10000
 esptool.py --port /dev/ttyUSB0 write_flash 0x10000 firmware.bin
+
+# CrowPanel: S3 native USB; flash app at 0x10000 (ota_0 slot)
+esptool.py --chip esp32s3 --port /dev/ttyACM0 write_flash 0x10000 firmware.bin
 ```
 
 ## Hardware Reference
+
+### Elecrow CrowPanel ESP32-S3 Terminal 3.5" (DLC35020S) Pin Map
+
+| Pin | Function |
+|-----|----------|
+| GPIO 13 | LCD + SD MOSI (shared bus) |
+| GPIO 14 | LCD + SD MISO |
+| GPIO 12 | LCD + SD SCLK |
+| GPIO 3 | LCD CS |
+| GPIO 42 | LCD D/C |
+| GPIO 46 | LCD backlight (active HIGH) |
+| GPIO 10 | SD card CS |
+| GPIO 2 / 1 | FT6236 touch I2C SDA / SCL (0x38) |
+| GPIO 45 | Piezo buzzer |
+| GPIO 7/2/1/… | OV2640 camera (deferred, not configured in v1) |
+
+- TFT driver: ILI9488 (SPI, `SPI_18BIT_DRIVER` path in TFT_eSPI), 320×480 native, portrait default (rotation 0)
+- SPI: shared LCD/SD bus, 40MHz write / 16MHz read; SD is CS-gated at 4MHz (Elecrow's demo proves the bus stable at 60MHz)
+- Touch: FT6236 capacitive, Wire poll, no INT pin; coordinates debug-only
+- Memory: 8MB flash (`partitions_crowpanel.csv`, dual 3MB OTA + 1.9MB SPIFFS + coredump), `qio_opi` PSRAM
+- If the physical module turns out not to be R8 (octal PSRAM), switch `board_build.arduino.memory_type` to `qio_qspi`
 
 ### ESP32-2432S028R Pin Map
 

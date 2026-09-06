@@ -1,11 +1,11 @@
-# CYD Flock-You
+# CrowPanel-Flock-You
 
-Cheap Yellow Display firmware for passive, human-reviewed Flock Safety / ALPR camera discovery. Pairs with [FlockFree Navigation](https://github.com/yetisoldier/FlockFree-Navigation) for the full mobile integration.
+Firmware for passive, human-reviewed Flock Safety / ALPR camera discovery, running on the **Elecrow CrowPanel ESP32-S3 Terminal 3.5"** (DLC35020S) and the original Cheap Yellow Display (CYD / ESP32-2432S028R). Pairs with [FlockFree Navigation](https://github.com/yetisoldier/FlockFree-Navigation) for the full mobile integration.
 
-Here is a link to the hardware I'm using. I have no affilation with this this company. It was $9.99 whe I bought them in May 2024. I just checked now and it was $12.25 on "mega sale." https://www.aliexpress.us/item/3256805974330395.html?spm=a2g0o.order_list.order_list_main.25.29f51802BXxYfX&gatewayAdapt=glo2usa
+> ### ⚠️ Wire-name constraint (read this first)
+> The BLE advertisement name is **`CYD-Flock-You`** and the protocol version is **1** on *every* board, including CrowPanel. This is not branding — the shipped `deflock-app` Android companion pairs on `device == "CYD-Flock-You" && protocol_version == 1`. The repo/product name is CrowPanel-Flock-You, but the on-wire identity is a compatibility contract with the shipped app and cannot change without a coordinated app update and a protocol bump.
 
-
-![CYD Hardware](docs/cyd-photo.jpg)
+This fork ports the CYD firmware ([yetisoldier/CYD-Flock-You](https://github.com/yetisoldier/CYD-Flock-You)) to the CrowPanel. Port design: `docs/port/bob-port-design.md` (Bob) · verified hardware facts: `docs/port-research/scout-hardware-report.md`.
 
 ## What It Does
 
@@ -30,11 +30,29 @@ The CYD also continuously scans for Flock-style BLE signatures, with a live stat
 
 ## Hardware Requirements
 
-- **ESP32-2432S028R** (Cheap Yellow Display) — ESP32 with ILI9341 240×320 TFT
+- **Elecrow CrowPanel ESP32-S3 Terminal 3.5"** (DLC35020S) — ESP32-S3 with ILI9488 320×480 SPI TFT, FT6236 capacitive touch, OV2640 camera, SD on the shared LCD SPI bus — **or** **ESP32-2432S028R** (Cheap Yellow Display) — ESP32 with ILI9341 240×320 TFT
 - **microSD card** (recommended, for CSV logging)
 - **USB power bank** or stable USB power (the ESP32 is sensitive to power fluctuations)
 
-### Pin Map
+### CrowPanel Pin Map (DLC35020S)
+
+Verified against Elecrow's official demo repo ([Elecrow-RD/esp32-terminal](https://github.com/Elecrow-RD/esp32-terminal), `SPI/` tree):
+
+| Pin | Function |
+|-----|----------|
+| GPIO 13 | LCD + SD MOSI (shared SPI bus) |
+| GPIO 14 | LCD + SD MISO |
+| GPIO 12 | LCD + SD SCLK |
+| GPIO 3 | LCD CS |
+| GPIO 42 | LCD D/C |
+| GPIO 46 | LCD backlight (active HIGH) |
+| GPIO 10 | SD CS (shares the LCD bus) |
+| GPIO 2 / 1 | FT6236 touch I2C SDA / SCL (addr 0x38) |
+| GPIO 45 | Piezo buzzer |
+
+Camera (OV2640) and audio pins are recorded in the Scout report for future use but are **not configured in v1** — deferred per the port design (ADR-3).
+
+### CYD Pin Map
 
 | Pin | Function |
 |-----|----------|
@@ -112,23 +130,19 @@ brew install platformio
 ### 2. Clone and build
 
 ```bash
-git clone https://github.com/yetisoldier/CYD-Flock-You.git
-cd CYD-Flock-You
-pio run -e cyd
+git clone https://github.com/yetisoldier/CrowPanel-Flock-You.git
+cd CrowPanel-Flock-You
+pio run -e crowpanel   # CrowPanel ESP32-S3 Terminal 3.5"
+# or: pio run -e cyd    # original Cheap Yellow Display
 ```
 
 ### 3. Flash the firmware
 
-Connect the CYD via USB to your computer:
+Connect the board via USB to your computer. The CrowPanel uses the S3's native USB (hold **BOOT**, tap **RST** if it doesn't enter download mode automatically):
 
 ```bash
-pio run -e cyd -t upload
-```
-
-Or use the helper script:
-
-```bash
-./scripts/flash-cyd.sh
+pio run -e crowpanel -t upload   # CrowPanel
+# or: pio run -e cyd -t upload    # CYD (helper script: ./scripts/flash-cyd.sh)
 ```
 
 ### 4. Verify
@@ -136,7 +150,7 @@ Or use the helper script:
 Open the serial monitor:
 
 ```bash
-pio device monitor -e cyd
+pio device monitor -e crowpanel
 ```
 
 Type `FYHELLO` and press Enter. You should see a JSON response:
@@ -144,6 +158,8 @@ Type `FYHELLO` and press Enter. You should see a JSON response:
 ```json
 {"event":"pair_status","device":"CYD-Flock-You","protocol_version":1,"features":["wifi_promisc","phone_gps","sd_csv","tft_status","ble_uart"],"gps":false,"sd":true,"detections":0,"csv_rows":0}
 ```
+
+Note the `device` name is `CYD-Flock-You` even on CrowPanel — see the wire-name constraint at the top of this README.
 
 ## Display
 
@@ -156,16 +172,18 @@ The CYD TFT shows a FlockFree-styled UI with navy/cyan/blue colors and danger ac
 
 ### Display Controls
 
-The CYD touchscreen and boot button control the display:
+The touchscreen controls the display on both boards (the CYD additionally has the boot button for rotation):
 
 | Control | Action |
 |---------|--------|
-| Touchscreen tap | Cycle to the next display screen |
-| Boot button press (GPIO 0) | Rotate the screen orientation |
+| Touchscreen tap | Cycle to the next display screen / dismiss the FLOCK FOUND flash |
+| Boot button press (CYD only, GPIO 0) | Rotate the screen orientation |
+
+On the CrowPanel there is no spare button (GPIO0 is the BOOT strap), so rotation is not cycled from a physical control — screens are changed by touch or the `FYSCREEN,next` serial command.
 
 The orientation cycles through landscape, portrait, landscape reversed, and portrait reversed. The firmware uses a portrait-aware layout, so the display content should stay inside the screen in both orientations.
 
-The standard ESP32-2432S028R touch controller is an XPT2046 wired on a separate SPI bus from the TFT. This firmware reads it directly on GPIO 25/32/39/33 with IRQ on GPIO 36.
+The standard ESP32-2432S028R touch controller is an XPT2046 wired on a separate SPI bus from the TFT. This firmware reads it directly on GPIO 25/32/39/33 with IRQ on GPIO 36. On the CrowPanel, touch is an FT6236 capacitive controller at I2C address 0x38 (SDA=2, SCL=1), polled without an interrupt pin. On both boards the firmware only needs "screen tapped" — coordinates are debug-only.
 
 ## Usage
 
