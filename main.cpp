@@ -1190,13 +1190,13 @@ static uint16_t cydTouchRead12(uint8_t command) {
 static uint16_t cydTouchLastX = 0, cydTouchLastY = 0, cydTouchLastZ = 0;
 
 static bool boardTouchPressed() {
-  // XPT2046 IRQ line is active low while the panel is pressed.
+  // XPT2046 IRQ line is active low while the panel is pressed — this is the
+  // exact pressed-test the original cydTouchReadPoint() used (no z
+  // threshold; behavior must stay identical on CYD). The x/y/z reads below
+  // match the original read sequence so the debug log line is unchanged.
   if (digitalRead(CYD_TOUCH_IRQ_PIN) != LOW) return false;
 
   uint16_t z = cydTouchRead12(0xB0);  // Z1 pressure sample
-  if (z == 0) return false;
-  // Coordinates are not used for hit-testing; they are captured only so
-  // the debug log line keeps its historical x/y/z fields.
   uint16_t x = cydTouchRead12(0xD0);
   uint16_t y = cydTouchRead12(0x90);
   cydTouchLastX = x; cydTouchLastY = y; cydTouchLastZ = z;
