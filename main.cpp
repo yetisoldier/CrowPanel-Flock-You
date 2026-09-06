@@ -4,11 +4,23 @@
 #include <ctype.h>
 #include <string.h>
 #include <SPIFFS.h>
-#if CYD_BUILD
+
+// Channel-hop modes are needed by board_config.h (per-board CHANNEL_MODE).
+#define CHANNEL_MODE_FULL_HOP   0
+#define CHANNEL_MODE_CUSTOM     1
+#define CHANNEL_MODE_SINGLE     2
+
+// Per-board pins / dimensions / touch controller (ADR-2).
+#include "board_config.h"
+
+#if FY_UI_BUILD
 #include <SPI.h>
 #include <SD.h>
 #include <TFT_eSPI.h>
 #include <TinyGPSPlus.h>
+#if FY_TOUCH_FT6236_I2C
+#include <Wire.h>
+#endif
 #include <BLEDevice.h>
 #include <BLEServer.h>
 #include <BLEUtils.h>
@@ -19,31 +31,16 @@
 // CONFIG
 // ============================================================
 
-#if CYD_BUILD
-#define BUZZER_PIN 26
-#define USE_BUZZER 1
-
-#define CYD_TFT_BACKLIGHT_PIN 21
-#define CYD_BOOT_BUTTON_PIN   0
-#define CYD_SD_CS_PIN         5
-#define CYD_LOG_FILE          "/flock.csv"
+// Wire contract with the shipped deflock-app companion: the BLE
+// advertisement name and protocol version are compatibility constants,
+// identical on every board. Do not change without a coordinated app update.
 #define CYD_PROTOCOL_VERSION  1
 #define CYD_PAIR_NAME         "CYD-Flock-You"
 #define CYD_GPS_STALE_MS      10000
 #define CYD_UI_REFRESH_MS     1000
-#define CYD_TFT_ROTATION      1
-#define CYD_TFT_W      320
-#define CYD_TFT_H      240
-#define CYD_ROTATION_DEBOUNCE_MS 300
-#define CYD_TOUCH_IRQ_PIN     36
-#define CYD_TOUCH_MISO_PIN    39
-#define CYD_TOUCH_MOSI_PIN    32
-#define CYD_TOUCH_CLK_PIN     25
-#define CYD_TOUCH_CS_PIN      33
 
-// Dynamic screen dimensions, updated when rotation changes.
-static uint16_t cydScreenW = CYD_TFT_W;
-static uint16_t cydScreenH = CYD_TFT_H;
+#if FY_UI_BUILD
+// Colors and BLE/scan constants shared by every UI board.
 #define CYD_BLE_SERVICE_UUID  "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
 #define CYD_BLE_RX_UUID       "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"
 #define CYD_BLE_TX_UUID       "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"
@@ -76,18 +73,15 @@ static uint16_t cydScreenH = CYD_TFT_H;
 #define CYD_COLOR_TEXT        0xFFFF
 #define CYD_COLOR_MUTED       0x9CD3
 #define CYD_COLOR_LINE        0x067A
-#else
-#define BUZZER_PIN 3
-#define USE_BUZZER 1
+#endif // FY_UI_BUILD
+
+// Dynamic screen dimensions, updated when rotation changes.
+#if FY_UI_BUILD
+static uint16_t cydScreenW = CYD_TFT_W;
+static uint16_t cydScreenH = CYD_TFT_H;
 #endif
 
-#if CYD_BUILD
-// CYD RGB LEDs are active low. Red is safe to use for detection feedback.
-#define LED_PIN          4
-#define USE_LED          1
-#define LED_ACTIVE_HIGH  0
-#define LED_FLASH_MS     120
-#else
+#if !defined(USE_LED)
 // Onboard user LED on Seeed XIAO ESP32-S3 is GPIO21 and is ACTIVE LOW
 // (driving the pin LOW lights the LED).
 #define LED_PIN          21
@@ -95,23 +89,16 @@ static uint16_t cydScreenH = CYD_TFT_H;
 #define LED_ACTIVE_HIGH  0
 #define LED_FLASH_MS     120
 #endif
+// (CYD and CrowPanel LED settings come from board_config.h; on boards with
+// no user LED, USE_LED is 0 and LED_PIN stays undefined.)
 
-#if CYD_BUILD
-#define MIRROR_SERIAL    0
-#else
+#if !defined(MIRROR_SERIAL)
 #define MIRROR_SERIAL    1
 #define MIRROR_TX_PIN    43
 #define MIRROR_BAUD      115200
 #endif
 
-#define CHANNEL_MODE_FULL_HOP   0
-#define CHANNEL_MODE_CUSTOM     1
-#define CHANNEL_MODE_SINGLE     2
-
-#if CYD_BUILD
-#define CHANNEL_MODE CHANNEL_MODE_FULL_HOP
-#define CHANNEL_DWELL_MS 750
-#else
+#if !defined(CHANNEL_MODE)
 #define CHANNEL_MODE CHANNEL_MODE_CUSTOM
 #define CHANNEL_DWELL_MS 250
 #endif
@@ -325,7 +312,7 @@ static volatile unsigned long ledOffAt = 0;
 static unsigned long fyLastTargetSeen  = 0;
 static unsigned long fyLastHeartbeatAt = 0;
 
-#if CYD_BUILD
+#if FY_UI_BUILD
 // ============================================================
 // CYD DISPLAY / GPS / SD STATE
 // ============================================================
@@ -457,7 +444,7 @@ static void dualPrintf(const char* fmt, ...) {
 #if MIRROR_SERIAL
     Serial1.write(_dualBuf, written);
 #endif
-#if CYD_BUILD
+#if FY_UI_BUILD
     cydBleWriteBytes((const uint8_t*)_dualBuf, written);
 #endif
   }
@@ -468,7 +455,7 @@ static void dualPrintln(const char* str) {
 #if MIRROR_SERIAL
   Serial1.println(str);
 #endif
-#if CYD_BUILD
+#if FY_UI_BUILD
   cydBleWriteBytes((const uint8_t*)str, strlen(str));
   cydBleWriteBytes((const uint8_t*)"\n", 1);
 #endif
@@ -984,7 +971,7 @@ static void fyPromotePrevSession() {
              source, (unsigned)sz);
 }
 
-#if CYD_BUILD
+#if FY_UI_BUILD
 // ============================================================
 // CYD PHONE PAIRING / DISPLAY / SD CSV
 // ============================================================
@@ -1151,7 +1138,20 @@ static void cydEmitPairStatus() {
       (unsigned long)methodCounts[ALERT_WILDCARD_PROBE_IE_SIG]);
 }
 
-static void cydInitTouch() {
+// ============================================================
+// TOUCH — board abstraction (ADR-2)
+// ============================================================
+// Callers only need a debounced "finger down now" edge plus a debug
+// status emitter; coordinates are never used for hit-testing, so no
+// calibration is required. Each board implements:
+//   boardTouchInit()    — set up pins / bus / controller
+//   boardTouchPressed() — true while a finger is on the panel
+//   boardTouchDebug()   — FYTOUCH status JSON (non-protocol, debug only)
+
+#if FY_TOUCH_XPT2046_BITBANG
+// ---- CYD: bit-banged XPT2046 resistive touch (original impl, unchanged) ----
+
+static void boardTouchInit() {
   pinMode(CYD_TOUCH_CS_PIN, OUTPUT);
   pinMode(CYD_TOUCH_CLK_PIN, OUTPUT);
   pinMode(CYD_TOUCH_MOSI_PIN, OUTPUT);
@@ -1186,20 +1186,24 @@ static uint16_t cydTouchRead12(uint8_t command) {
   return (uint16_t)(((hi << 8) | lo) >> 3);
 }
 
-static bool cydTouchReadPoint(uint16_t* outX, uint16_t* outY, uint16_t* outZ) {
-  bool irqDown = digitalRead(CYD_TOUCH_IRQ_PIN) == LOW;
-  if (!irqDown) return false;
+// Last raw sample, for the debug log only (see boardTouchPressed).
+static uint16_t cydTouchLastX = 0, cydTouchLastY = 0, cydTouchLastZ = 0;
+
+static bool boardTouchPressed() {
+  // XPT2046 IRQ line is active low while the panel is pressed.
+  if (digitalRead(CYD_TOUCH_IRQ_PIN) != LOW) return false;
 
   uint16_t z = cydTouchRead12(0xB0);  // Z1 pressure sample
+  if (z == 0) return false;
+  // Coordinates are not used for hit-testing; they are captured only so
+  // the debug log line keeps its historical x/y/z fields.
   uint16_t x = cydTouchRead12(0xD0);
   uint16_t y = cydTouchRead12(0x90);
-  if (outX) *outX = x;
-  if (outY) *outY = y;
-  if (outZ) *outZ = z;
+  cydTouchLastX = x; cydTouchLastY = y; cydTouchLastZ = z;
   return true;
 }
 
-static void cydEmitTouchStatus() {
+static void boardTouchDebug() {
   uint16_t z1 = cydTouchRead12(0xB0);
   uint16_t z2 = cydTouchRead12(0xC0);
   uint16_t x = cydTouchRead12(0xD0);
@@ -1209,11 +1213,75 @@ static void cydEmitTouchStatus() {
       digitalRead(CYD_TOUCH_IRQ_PIN), (unsigned)x, (unsigned)y, (unsigned)z1, (unsigned)z2);
 }
 
+#elif FY_TOUCH_FT6236_I2C
+// ---- CrowPanel: FT6236 capacitive touch, Wire poll (no INT pin wired) ----
+// Register map and read pattern follow Elecrow's official A-TOUCH demo
+// (Elecrow-RD/esp32-terminal): TD_STATUS (0x02) = number of touch points;
+// XH/XL/YH/YL = 0x03..0x06. Coordinates are read for debug only.
+
+#define FT6236_REG_TD_STATUS 0x02
+#define FT6236_REG_XH        0x03
+#define FT6236_REG_XL        0x04
+#define FT6236_REG_YH        0x05
+#define FT6236_REG_YL        0x06
+#define FT6236_REG_VENDID    0xA8
+#define FT6236_REG_CHIPID    0xA6
+
+static uint8_t ft6236ReadReg(uint8_t reg) {
+  Wire.beginTransmission(FY_TOUCH_I2C_ADDR);
+  Wire.write(reg);
+  if (Wire.endTransmission(false) != 0) return 0xFF;  // NACK/bus error
+  uint8_t n = Wire.requestFrom(FY_TOUCH_I2C_ADDR, (uint8_t)1);
+  if (n != 1) return 0xFF;
+  return (uint8_t)Wire.read();
+}
+
+static void boardTouchInit() {
+  Wire.begin(FY_TOUCH_I2C_SDA, FY_TOUCH_I2C_SCL, FY_TOUCH_I2C_FREQ_HZ);
+  uint8_t vendor = ft6236ReadReg(FT6236_REG_VENDID);
+  uint8_t chip   = ft6236ReadReg(FT6236_REG_CHIPID);
+  // FTDI vendor id for FT6xx6 controllers is 0x11; chip id 0x64 = FT6236.
+  // A read returning 0xFF means no device — touch is degraded, not fatal.
+  if (vendor == 0xFF || chip == 0xFF) {
+    dualPrintln("[touch] FT6236 not responding on I2C");
+  } else {
+    dualPrintf("[touch] FT6236 ready (vendor=0x%02X chip=0x%02X)\n",
+              (unsigned)vendor, (unsigned)chip);
+  }
+}
+
+static bool boardTouchPressed() {
+  uint8_t points = ft6236ReadReg(FT6236_REG_TD_STATUS);
+  // TD_STATUS: 0 = no touch, 1-2 = touch points, 0xFF = read failure.
+  // A read failure is treated as "not pressed" so a missing/broken
+  // controller can never fake a stuck touch.
+  return points >= 1 && points <= 2;
+}
+
+static void boardTouchDebug() {
+  uint8_t points = ft6236ReadReg(FT6236_REG_TD_STATUS);
+  uint8_t xh = ft6236ReadReg(FT6236_REG_XH);
+  uint8_t xl = ft6236ReadReg(FT6236_REG_XL);
+  uint8_t yh = ft6236ReadReg(FT6236_REG_YH);
+  uint8_t yl = ft6236ReadReg(FT6236_REG_YL);
+  unsigned x = ((unsigned)(xh & 0x0F) << 8) | xl;
+  unsigned y = ((unsigned)(yh & 0x0F) << 8) | yl;
+  dualPrintf(
+      "{\"event\":\"touch_status\",\"points\":%u,\"x\":%u,\"y\":%u}\n",
+      (unsigned)points, x, y);
+}
+
+#endif // touch board selection
+
 static void cydInitDisplay() {
+#if CYD_BUILD
+  // CYD drives its own backlight pin; CrowPanel's BL is handled by TFT_eSPI
+  // via the TFT_BL build flag, and has no separate boot button.
   pinMode(CYD_TFT_BACKLIGHT_PIN, OUTPUT);
   digitalWrite(CYD_TFT_BACKLIGHT_PIN, HIGH);
   pinMode(CYD_BOOT_BUTTON_PIN, INPUT_PULLUP);
-  cydInitTouch();
+#endif
+  boardTouchInit();
 
   tft.init();
   tft.setRotation(cydTftRotation);
@@ -1230,14 +1298,18 @@ static void cydDrawHeader(const char* title) {
   tft.drawFastHLine(0, 35, cydScreenW, CYD_COLOR_CYAN);
   tft.setTextColor(CYD_COLOR_TEXT, CYD_COLOR_NAVY);
   tft.setTextSize(2);
-  tft.drawString("FlockFree CYD", 8, 4);
+  tft.drawString(FY_UI_BRAND, 8, 4);
   tft.setTextSize(1);
   tft.setTextColor(CYD_COLOR_CYAN, CYD_COLOR_NAVY);
   tft.drawString(title, 10, 24);
+#if CYD_BUILD
+  // "BTN" badge hints the CYD boot button rotates the screen. CrowPanel has
+  // no spare button, so the badge is omitted there (touch cycles screens).
   tft.fillRoundRect(cydScreenW - 42, 8, 34, 18, 9, CYD_COLOR_SURFACE_2);
   tft.drawRoundRect(cydScreenW - 42, 8, 34, 18, 9, CYD_COLOR_CYAN);
   tft.setTextColor(CYD_COLOR_TEXT, CYD_COLOR_SURFACE_2);
   tft.drawString("BTN", cydScreenW - 35, 13);
+#endif
 }
 
 static void cydDrawUi(bool force = false) {
@@ -1517,6 +1589,10 @@ static void cydSetDisplayRotation(uint8_t rotation, bool redraw) {
 }
 
 static void cydButtonTick() {
+#if CYD_BUILD
+  // CYD's boot button rotates the display. CrowPanel has no spare button
+  // (GPIO0 is the BOOT strap), so rotation there is via touch/screens or
+  // the FYSCREEN command.
   bool state = digitalRead(CYD_BOOT_BUTTON_PIN);
   unsigned long now = millis();
   if (cydLastButtonState == HIGH && state == LOW && now - cydLastButtonAt > 250) {
@@ -1525,13 +1601,13 @@ static void cydButtonTick() {
     dualPrintf("[cyd] button -> rotation %u\n", (unsigned)cydTftRotation);
   }
   cydLastButtonState = state;
+#else
+  (void)0;  // no button on this board
+#endif
 }
 
 static void cydTouchTick() {
-  uint16_t x = 0;
-  uint16_t y = 0;
-  uint16_t z = 0;
-  bool down = cydTouchReadPoint(&x, &y, &z);
+  bool down = boardTouchPressed();
   unsigned long now = millis();
   if (down && !cydLastTouchDown && now - cydLastTouchMs > CYD_ROTATION_DEBOUNCE_MS) {
     cydLastTouchMs = now;
@@ -1547,8 +1623,15 @@ static void cydTouchTick() {
 
     cydScreen = (CydScreen)(((uint8_t)cydScreen + 1) % SCREEN_COUNT);
     cydDrawUi(true);
+#if FY_TOUCH_XPT2046_BITBANG
+    // Preserve the CYD debug line verbatim (raw last sample, may be stale
+    // if the finger lifted mid-read — it was the same before the port).
     dualPrintf("[cyd] touch -> screen %u x=%u y=%u z=%u\n",
-               (unsigned)cydScreen, (unsigned)x, (unsigned)y, (unsigned)z);
+               (unsigned)cydScreen, (unsigned)cydTouchLastX,
+               (unsigned)cydTouchLastY, (unsigned)cydTouchLastZ);
+#else
+    dualPrintf("[cyd] touch -> screen %u\n", (unsigned)cydScreen);
+#endif
   }
   cydLastTouchDown = down;
 }
@@ -1703,7 +1786,7 @@ static void cydHandleCommand(char* line) {
     return;
   }
   if (strcmp(line, "FYTOUCH") == 0) {
-    cydEmitTouchStatus();
+    boardTouchDebug();
     return;
   }
   if (strcmp(line, "FYSIM") == 0) {
@@ -1973,7 +2056,7 @@ class BleFlockAdvertisedCallbacks : public BLEAdvertisedDeviceCallbacks {
     char oui[9] = "";
     if (strlen(macStr) >= 8) { strncpy(oui, macStr, 8); oui[8] = '\0'; }
 
-#if CYD_BUILD
+#if FY_UI_BUILD
     // Record detection for CYD display (triggers red flash screen)
     cydRecordDetection(macStr, oui, "ble_flock_battery", (int8_t)rssi, 0, hitCount);
 #endif
@@ -2131,7 +2214,7 @@ static void emitDetectionJSON(const char* mac, const char* method,
          &mbytes[0], &mbytes[1], &mbytes[2], &mbytes[3], &mbytes[4], &mbytes[5]);
   ouiFromMac(mbytes, oui, sizeof(oui));
 
-#if CYD_BUILD
+#if FY_UI_BUILD
   char gpsSuffix[180] = "";
   if (cydGps.hasFix) {
     snprintf(gpsSuffix, sizeof(gpsSuffix),
@@ -2153,14 +2236,14 @@ static void emitDetectionJSON(const char* mac, const char* method,
       "\"frequency\":%u,"
       "\"ssid\":\"%s\""
       "\"confidence\":\"%s\""
-#if CYD_BUILD
+#if FY_UI_BUILD
       "%s"
 #endif
       "}\n",
       method, mac, oui, rssi,
       (unsigned)ch, (unsigned)channelFreqMhz(ch), ssidEsc,
       confidence ? confidence : "unknown"
-#if CYD_BUILD
+#if FY_UI_BUILD
       , gpsSuffix
 #endif
       );
@@ -2485,7 +2568,7 @@ static void drainAlertQueue() {
                  (idx >= 0) ? (int)fyDet[idx].count : 0);
     }
 
-#if CYD_BUILD
+#if FY_UI_BUILD
     cydRecordDetection(macStr, oui, method, e.rssi, e.channel,
                        (idx >= 0) ? fyDet[idx].count : 0);
 #endif
@@ -2546,6 +2629,8 @@ void setup() {
 #if !CYD_BUILD
   // Crucial for USB-optional operation: without this, Serial.write() will
   // block indefinitely on an ESP32-S3 USB-CDC port when no host is attached.
+  // Applies to every non-CYD build (xiao headless AND CrowPanel — both are
+  // S3 native-USB builds); the classic-ESP32 CYD never uses USB-CDC.
   Serial.setTxTimeoutMs(0);
 #endif
   delay(300);
@@ -2572,7 +2657,7 @@ void setup() {
   precompileOuis();
   memset(dedupeTable, 0, sizeof(dedupeTable));
 
-#if CYD_BUILD
+#if FY_UI_BUILD
   cydInit();
   bleFlockLastScanMs = 0;
 #endif
@@ -2645,7 +2730,7 @@ void setup() {
 }
 
 void loop() {
-#if CYD_BUILD
+#if FY_UI_BUILD
   cydSerialTick();
   cydBleDrainCommands();
   cydBleFlockTick();
