@@ -360,6 +360,11 @@ static bool cydLastButtonState = HIGH;
 static uint8_t cydTftRotation = CYD_TFT_ROTATION;
 static unsigned long cydLastTouchMs = 0;
 static bool cydLastTouchDown = false;
+// Tap-vs-hold contact state: screen-cycle waits for release (so a hold
+// cannot cycle a screen first), hold fires once at FY_ROTATE_HOLD_MS.
+static unsigned long cydTouchDownAt = 0;   // contact start; 0 = no contact
+static bool cydTouchHoldFired = false;     // hold already handled this contact
+static bool cydTouchTapArmed = false;      // contact was a valid tap candidate
 static char cydLastMac[18] = "";
 static char cydLastMethod[20] = "";
 static int cydLastRssi = 0;
@@ -1646,32 +1651,81 @@ static void cydButtonTick() {
 #endif
 }
 
+// Touch gesture handling — tap and press-and-hold are mutually exclusive
+// per contact:
+//   - Finger down (debounced) arms a tap candidate and starts the hold
+//     timer; a flash overlay, if active, is dismissed and consumes the
+//     contact (a subsequent hold can rotate).
+//   - While down: when the contact age reaches FY_ROTATE_HOLD_MS, rotate to
+//     the next orientation ONCE (redraw + persist), disarm the tap, and
+//     mark the contact handled so the release does not also cycle screens.
+//   - Finger up before the threshold (and not held): the armed tap fires —
+//     the original screen-cycle behavior.
+// Each new contact starts a fresh hold timer; the debounce window gates
+// contact start only and never interacts with the hold timer itself.
 static void cydTouchTick() {
   bool down = boardTouchPressed();
   unsigned long now = millis();
-  if (down && !cydLastTouchDown && now - cydLastTouchMs > CYD_ROTATION_DEBOUNCE_MS) {
+
+  if (down && !cydLastTouchDown) {
+    // New contact: only accept it outside the debounce window.
+    if (now - cydLastTouchMs <= CYD_ROTATION_DEBOUNCE_MS) {
+      cydLastTouchDown = down;
+      return;
+    }
     cydLastTouchMs = now;
 
-    // If flash overlay is active, any touch dismisses it immediately
+    // If flash overlay is active, any touch dismisses it immediately and
+    // consumes the contact (existing behavior wins).
     if (cydFlashActive) {
       cydFlashActive = false;
       cydDrawUi(true);
       dualPrintf("[cyd] touch -> flash dismissed\n");
+      cydTouchDownAt = 0;
+      cydTouchHoldFired = false;
+      cydTouchTapArmed = false;
       cydLastTouchDown = down;
       return;
     }
 
-    cydScreen = (CydScreen)(((uint8_t)cydScreen + 1) % SCREEN_COUNT);
-    cydDrawUi(true);
+    cydTouchDownAt = now;
+    cydTouchHoldFired = false;
+    cydTouchTapArmed = true;  // tap candidate until the hold fires
+    cydLastTouchDown = down;
+    return;
+  }
+
+  if (down && cydLastTouchDown && cydTouchDownAt != 0 && !cydTouchHoldFired &&
+      now - cydTouchDownAt >= FY_ROTATE_HOLD_MS) {
+    // Hold threshold reached: rotate once, persist, disarm the tap.
+    cydTouchHoldFired = true;
+    cydTouchTapArmed = false;
+    cydSetDisplayRotation((cydTftRotation + 1) % 4, true);
+    bool saved = fySaveRotation(cydTftRotation);
+    dualPrintf("[cyd] touch hold -> rotation %u%s\n",
+               (unsigned)cydTftRotation, saved ? "" : " (save failed)");
+    cydLastTouchDown = down;
+    return;
+  }
+
+  if (!down && cydLastTouchDown) {
+    // Release: fire the screen-cycle tap only when the hold did not.
+    if (cydTouchTapArmed && !cydTouchHoldFired) {
+      cydScreen = (CydScreen)(((uint8_t)cydScreen + 1) % SCREEN_COUNT);
+      cydDrawUi(true);
 #if FY_TOUCH_XPT2046_BITBANG
-    // Preserve the CYD debug line verbatim (raw last sample, may be stale
-    // if the finger lifted mid-read — it was the same before the port).
-    dualPrintf("[cyd] touch -> screen %u x=%u y=%u z=%u\n",
-               (unsigned)cydScreen, (unsigned)cydTouchLastX,
-               (unsigned)cydTouchLastY, (unsigned)cydTouchLastZ);
+      // Preserve the CYD debug line verbatim (raw last sample, may be stale
+      // if the finger lifted mid-read — it was the same before the port).
+      dualPrintf("[cyd] touch -> screen %u x=%u y=%u z=%u\n",
+                 (unsigned)cydScreen, (unsigned)cydTouchLastX,
+                 (unsigned)cydTouchLastY, (unsigned)cydTouchLastZ);
 #else
-    dualPrintf("[cyd] touch -> screen %u\n", (unsigned)cydScreen);
+      dualPrintf("[cyd] touch -> screen %u\n", (unsigned)cydScreen);
 #endif
+    }
+    cydTouchDownAt = 0;
+    cydTouchHoldFired = false;
+    cydTouchTapArmed = false;
   }
   cydLastTouchDown = down;
 }

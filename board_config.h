@@ -115,3 +115,12 @@
   #define CHANNEL_DWELL_MS      250
 
 #endif
+
+// ---- Shared UI-build settings (all FY_UI_BUILD boards) ----
+// Press-and-hold touch gesture: holding a finger on the panel for this long
+// rotates to the next orientation (tap = change screen). Single definition
+// so boards cannot drift apart; well above a deliberate tap (~100-200ms)
+// and short enough to feel responsive.
+#if FY_UI_BUILD
+  #define FY_ROTATE_HOLD_MS      900
+#endif
