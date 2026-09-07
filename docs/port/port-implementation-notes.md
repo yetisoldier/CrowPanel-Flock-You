@@ -35,12 +35,16 @@ Hardware facts: `docs/port-research/scout-hardware-report.md`.
 4. **Rotation default 0 (portrait)** per ADR-4; the 320-wide landscape layout
    branch renders without clipping at 320×480 (Bob §3.5 verdict), just
    under-filled. Native 320×480 layout is v1.1 work.
-5. **Runtime rotation via `FYROTATE,next|<0-3>`** (serial/BLE command):
+5. **Runtime rotation via `FYROTATE,next|<0-3>` (serial/BLE) and touch
+   press-and-hold (~0.9s, `FY_ROTATE_HOLD_MS` in board_config.h)**:
    CrowPanel has no spare button (GPIO0 is the BOOT strap), so the serial
-   command is the remote-control path — the chosen rotation persists to
-   SPIFFS (`/rotation`, one ASCII digit) and is restored at boot before
-   `cydInit()`'s first `setRotation()`. The CYD boot-button rotation cycle
-   is unchanged and does not persist.
+   command and the hold gesture are the rotation paths. Both persist the
+   chosen rotation to SPIFFS (`/rotation`, one ASCII digit), restored at
+   boot before `cydInit()`'s first `setRotation()`. Tap-vs-hold are
+   mutually exclusive per contact in `cydTouchTick()`: the screen-cycle
+   tap fires on release, the hold fires once at the threshold — so a hold
+   never cycles a screen first and releasing after a hold is inert. The
+   CYD boot-button rotation cycle is unchanged and does not persist.
 6. **Buzzer on GPIO45** (Elecrow A-BUZZER demo). Note GPIO45 is an S3
    strapping pin for VDD_SPI voltage; driving it as a normal output after
    boot is what Elecrow's own demo does — verified safe by their demo code.
@@ -88,7 +92,9 @@ Hardware facts: `docs/port-research/scout-hardware-report.md`.
 ## Hardware test checklist (first flash on the physical board)
 
 1. Backlight comes on, SCAN screen renders full-bleed (portrait, 320×480).
-2. Tap cycles SCAN→GPS→LOG→LAST; `FYTOUCH` returns JSON on serial.
+2. Tap cycles SCAN→GPS→LOG→LAST; press-and-hold (~0.9s) rotates the
+   orientation; release after a hold does not cycle screens;
+   `FYTOUCH` returns JSON on serial.
 3. `FYSIM` triggers the red FLOCK FOUND flash; tap dismisses it.
 4. SD card present: `/flock.csv` created, `sd:true` in pair_status;
    absent: `sd:false`, firmware continues.

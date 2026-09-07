@@ -173,9 +173,12 @@ The touchscreen controls the display on both boards (the CYD additionally has th
 | Control | Action |
 |---------|--------|
 | Touchscreen tap | Cycle to the next display screen / dismiss the FLOCK FOUND flash |
+| Touchscreen press-and-hold (~0.9s) | Rotate to the next screen orientation (persisted across reboots) |
 | Boot button press (CYD only, GPIO 0) | Rotate the screen orientation |
 
-On the CrowPanel there is no spare button (GPIO0 is the BOOT strap), so rotation is changed with the `FYROTATE` serial command (persisted across reboots) — screens are changed by touch or the `FYSCREEN,next` serial command.
+Tap and press-and-hold are mutually exclusive per touch: a hold rotates the screen the moment the ~0.9s hold threshold (`FY_ROTATE_HOLD_MS`) is reached — releasing afterward does not also cycle screens — while a quick tap cycles screens on release, exactly as before. If the FLOCK FOUND flash overlay is active, any touch dismisses it first.
+
+On the CrowPanel there is no spare button (GPIO0 is the BOOT strap), so rotation is by touch press-and-hold or the `FYROTATE` serial command (both persisted across reboots) — screens are changed by tap or the `FYSCREEN,next` serial command.
 
 The orientation cycles through landscape, portrait, landscape reversed, and portrait reversed. The firmware uses a portrait-aware layout, so the display content should stay inside the screen in both orientations.
 
@@ -228,7 +231,7 @@ The standard ESP32-2432S028R touch controller is an XPT2046 wired on a separate 
 | `FYROTATE,next` or `FYROTATE,<0-3>` | Set screen rotation (persisted across reboot) |
 | `FYTOUCH` | Report raw touch diagnostic values |
 
-On the CYD, rotation can also be cycled with the physical boot button. `FYROTATE` works on both boards and persists the chosen orientation to SPIFFS (`/rotation`), restoring it on the next boot (compiled-in `CYD_TFT_ROTATION` default when absent or invalid). Response: `{"event":"rotate","rotation":<0-3>,"saved":true|false}` — `saved:false` only means SPIFFS is unavailable (rotation still applies until reboot).
+On the CYD, rotation can also be cycled with the physical boot button or by press-and-hold on the touchscreen. `FYROTATE` and the hold gesture both persist the chosen orientation to SPIFFS (`/rotation`), restoring it on the next boot (compiled-in `CYD_TFT_ROTATION` default when absent or invalid). Response: `{"event":"rotate","rotation":<0-3>,"saved":true|false}` — `saved:false` only means SPIFFS is unavailable (rotation still applies until reboot).
 
 ## Bluetooth Protocol
 
