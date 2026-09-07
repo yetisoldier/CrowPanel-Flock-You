@@ -89,3 +89,37 @@ Hardware facts: `docs/port-research/scout-hardware-report.md`.
 7. If display is blank: verify BL (46) and SPI pins before suspecting code
    (wrong BL pin = dead backlight, per Bob §10).
 8. If boot loops: likely PSRAM type mismatch — try `qio_qspi`.
+## Diagnostic build
+
+`env:crowpanel-diag` (`pio run -e crowpanel-diag`) is an audible-milestone
+variant of `env:crowpanel` for remote bring-up where no serial tooling is
+available — the buzzer (GPIO45) is the only confirmed-working output
+channel. It adds `-DFY_DIAG_BUILD=1` on top of the exact `env:crowpanel`
+flags; all normal code paths (`env:crowpanel`, `env:cyd`) are untouched.
+Not a release artifact — flash it to localize a boot-loop, then return to
+the normal build.
+
+Boot progress is announced in beeps: **N beeps = stage N was reached and
+returned; silence after N beeps (then the sequence restarting from M0) =
+crash in stage N+1.** A continuous 60 ms B4 metronome beep every 5 s in
+`loop()` means the firmware is fully up (steady state). The color-fill
+self-test after M1 additionally proves the TFT bus/backlight by eye.
+
+| Beeps | Milestone | Just-completed stage |
+|-------|-----------|----------------------|
+| 1 (M0) | Immediately at `setup()` start, before `Serial` init | CPU/Arduino core alive |
+| 2 (M1) | After `cydInit()` returns, then RGB + black full-screen fills (300 ms each) | Display + touch init |
+| 3 (M2) | After `SPIFFS.begin(true)` — beeps on pass **and** fail | Filesystem init |
+| 4 (M3) | After `esp_wifi_start()` returns | WiFi driver up (Marauder-minimal cfg) |
+| 5 (M4) | After `esp_wifi_set_promiscuous(true)` | Promiscuous sniffer armed |
+| Victory tune (M5) | 6 ascending notes (D5→D6) after "merged WiFi detector started" | Steady state reached |
+| 60 ms beep every 5 s | In `loop()` — still-alive metronome | Fully running |
+
+Stage beeps are 80 ms at 1046 Hz (C6) with 140 ms gaps — distinct pitches
+from the detection chirps (2000/2800 Hz), target heartbeat beeps (1500 Hz),
+and the SMB startup chime, so milestone counts can't be confused with
+detection audio. If the M5 victory tune never plays, the crash is between
+M4 and the `dualPrintln("merged WiFi detector started")` line.
+
+Build artifacts: `.pio/build/crowpanel-diag/bootloader.bin`,
+`partitions.bin`, `firmware.bin`.
