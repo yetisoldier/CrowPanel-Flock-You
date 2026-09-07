@@ -151,6 +151,8 @@ static const size_t SSID_KEYWORD_COUNT = sizeof(target_ssid_keywords) / sizeof(t
 #define FY_SESSION_FILE      "/session.json"
 #define FY_SESSION_TMP       "/session.tmp"
 #define FY_PREV_FILE         "/prev_session.json"
+#define FY_ROTATION_FILE     "/rotation"
+#define FY_ROTATION_TMP      "/rotation.tmp"
 #define AUTOSAVE_INTERVAL_MS 60000
 
 // ============================================================
@@ -1588,6 +1590,44 @@ static void cydSetDisplayRotation(uint8_t rotation, bool redraw) {
   }
 }
 
+// --- Screen-rotation persistence (FYROTATE command) -----------------------
+// One ASCII digit ('0'..'3') in /rotation, stored with the session-save
+// pattern (tmp write -> read-back validation -> atomic promote). A missing
+// or corrupt file simply falls back to the compiled CYD_TFT_ROTATION
+// default — worst case is one boot at the default orientation, never a
+// boot failure — so the single-byte preference needs no tmp-file recovery.
+static bool fySaveRotation(uint8_t rotation) {
+  if (!fySpiffsReady) return false;
+
+  char digit = (char)('0' + (rotation % 4));
+  File f = SPIFFS.open(FY_ROTATION_TMP, "w");
+  if (!f) return false;
+  f.write((uint8_t)digit);
+  f.close();
+
+  File v = SPIFFS.open(FY_ROTATION_TMP, "r");
+  bool ok = v && v.available() == 1 && (char)v.read() == digit;
+  if (v) v.close();
+  if (!ok) return false;
+
+  SPIFFS.remove(FY_ROTATION_FILE);
+  return fyAtomicPromote(FY_ROTATION_TMP, FY_ROTATION_FILE);
+}
+
+// Returns the persisted rotation, or the compiled default when the file is
+// absent/corrupt or SPIFFS is down. Never fails.
+static uint8_t fyLoadRotation() {
+  if (!fySpiffsReady) return CYD_TFT_ROTATION;
+  File f = SPIFFS.open(FY_ROTATION_FILE, "r");
+  if (!f) return CYD_TFT_ROTATION;
+  int c = f.read();
+  f.close();
+  if (c < '0' || c > '3') return CYD_TFT_ROTATION;
+  dualPrintf("[flockyou] rotation %u restored from SPIFFS\n",
+             (unsigned)(c - '0'));
+  return (uint8_t)(c - '0');
+}
+
 static void cydButtonTick() {
 #if CYD_BUILD
   // CYD's boot button rotates the display. CrowPanel has no spare button
@@ -1783,6 +1823,24 @@ static void cydHandleCommand(char* line) {
   if (strcmp(line, "FYSCREEN,next") == 0) {
     cydScreen = (CydScreen)(((uint8_t)cydScreen + 1) % SCREEN_COUNT);
     cydDrawUi(true);
+    return;
+  }
+  if (strncmp(line, "FYROTATE", 8) == 0) {
+    const char* arg = line + 8;
+    uint8_t target;
+    if (strcmp(arg, ",next") == 0) {
+      target = (uint8_t)((cydTftRotation + 1) % 4);
+    } else if (arg[0] == ',' && arg[1] >= '0' && arg[1] <= '3' && arg[2] == '\0') {
+      target = (uint8_t)(arg[1] - '0');
+    } else {
+      dualPrintln("{\"event\":\"rotate_error\",\"error\":\"usage\","
+                 "\"usage\":\"FYROTATE,next | FYROTATE,<0-3>\"}");
+      return;
+    }
+    cydSetDisplayRotation(target, true);  // redraw=true repaints the UI
+    bool saved = fySaveRotation(cydTftRotation);
+    dualPrintf("{\"event\":\"rotate\",\"rotation\":%u,\"saved\":%s}\n",
+               (unsigned)cydTftRotation, saved ? "true" : "false");
     return;
   }
   if (strcmp(line, "FYTOUCH") == 0) {
@@ -2657,12 +2715,9 @@ void setup() {
   precompileOuis();
   memset(dedupeTable, 0, sizeof(dedupeTable));
 
-#if FY_UI_BUILD
-  cydInit();
-  bleFlockLastScanMs = 0;
-#endif
-
   // SPIFFS — format on first boot if missing. Non-fatal if it fails.
+  // Runs before cydInit() so a persisted FYROTATE orientation can be
+  // applied before the display is first configured.
   if (SPIFFS.begin(true)) {
     fySpiffsReady = true;
     dualPrintln("[flockyou] SPIFFS ready");
@@ -2670,6 +2725,14 @@ void setup() {
   } else {
     dualPrintln("[flockyou] SPIFFS init FAILED — running without persistence");
   }
+
+#if FY_UI_BUILD
+  // Apply the FYROTATE-persisted orientation (compiled CYD_TFT_ROTATION
+  // default when absent/invalid) before cydInit()'s first setRotation().
+  cydTftRotation = fyLoadRotation();
+  cydInit();
+  bleFlockLastScanMs = 0;
+#endif
 
   WiFi.mode(WIFI_MODE_NULL);
   // Optimized WiFi init config — disables AMPDU, CSI, and NVS to reduce
