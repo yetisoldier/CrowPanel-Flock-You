@@ -35,11 +35,20 @@ Hardware facts: `docs/port-research/scout-hardware-report.md`.
 4. **Rotation default 0 (portrait)** per ADR-4; the 320-wide landscape layout
    branch renders without clipping at 320×480 (Bob §3.5 verdict), just
    under-filled. Native 320×480 layout is v1.1 work.
-5. **Buzzer on GPIO45** (Elecrow A-BUZZER demo). Note GPIO45 is an S3
+5. **Runtime rotation via `FYROTATE,next|<0-3>`** (serial/BLE command):
+   CrowPanel has no spare button (GPIO0 is the BOOT strap), so the serial
+   command is the remote-control path — the chosen rotation persists to
+   SPIFFS (`/rotation`, one ASCII digit) and is restored at boot before
+   `cydInit()`'s first `setRotation()`. The CYD boot-button rotation cycle
+   is unchanged and does not persist.
+6. **Buzzer on GPIO45** (Elecrow A-BUZZER demo). Note GPIO45 is an S3
    strapping pin for VDD_SPI voltage; driving it as a normal output after
    boot is what Elecrow's own demo does — verified safe by their demo code.
-6. **No LED on CrowPanel** — `USE_LED 0`; `LED_FLASH_MS` still defined
+7. **No LED on CrowPanel** — `USE_LED 0`; `LED_FLASH_MS` still defined
    (call sites pass it as an argument even when `ledFlash` is compiled out).
+8. **SPIFFS init moved before `cydInit()` in `setup()`** so the persisted
+   `FYROTATE` orientation is loaded before the display is first configured;
+   safe because `cydBleWriteBytes` is null-guarded before BLE init.
 
 ## Deviations from Bob's design (smallest reasonable choices)
 
