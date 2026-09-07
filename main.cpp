@@ -512,6 +512,9 @@ static void heartbeatBeep() {
   tone(BUZZER_PIN, HB_BEEP_HZ); delay(HB_BEEP_NOTE_MS); noTone(BUZZER_PIN);
 #endif
 }
+#if !FY_DIAG_BUILD
+// Unused in the diag build (replaced by the M0..M5 milestone sequence);
+// guarded out there so -Wunused-function stays silent.
 static void startupBeep() {
 #if USE_BUZZER
   // First 6 notes of SMB World 1-2 (underground). Koji Kondo's descending
@@ -525,6 +528,61 @@ static void startupBeep() {
   }
 #endif
 }
+#endif // !FY_DIAG_BUILD
+
+#if FY_DIAG_BUILD
+// ============================================================
+// AUDIBLE-MILESTONE DIAGNOSTICS  (crowpanel-diag build only)
+// ============================================================
+// Remote bring-up with no serial tooling: boot progress is announced as
+// N short beeps so a crash point can be identified by ear. N beeps means
+// stage N completed; silence after N beeps means the crash is in stage
+// N+1. Beep-code table: docs/port/port-implementation-notes.md
+// "Diagnostic build".
+
+#define DIAG_STAGE_HZ         1046   // C6 — distinct from chirp/HB/SMB pitches
+#define DIAG_STAGE_MS         80
+#define DIAG_STAGE_GAP_MS     140
+#define DIAG_METRO_HZ         494    // B4 — still-alive metronome
+#define DIAG_METRO_MS         60
+#define DIAG_METRO_PERIOD_MS  5000
+
+static void diagBeepN(int n) {
+#if USE_BUZZER
+  for (int i = 0; i < n; i++) {
+    tone(BUZZER_PIN, DIAG_STAGE_HZ);
+    delay(DIAG_STAGE_MS);
+    noTone(BUZZER_PIN);
+    if (i < n - 1) delay(DIAG_STAGE_GAP_MS);
+  }
+#endif
+}
+
+// Full-screen RGB + black fills — proves the TFT bus and backlight by eye
+// even if later UI code never renders (M1 self-test).
+static void diagDisplayTest() {
+#if FY_UI_BUILD
+  tft.fillScreen(TFT_RED);   delay(300);
+  tft.fillScreen(TFT_GREEN); delay(300);
+  tft.fillScreen(TFT_BLUE);  delay(300);
+  tft.fillScreen(TFT_BLACK); delay(300);
+#endif
+}
+
+// M5 victory tune: six ascending notes (D5→D6), deliberately distinct
+// from the SMB underground chime so "fully booted" is unmistakable.
+static void diagVictoryTune() {
+#if USE_BUZZER
+  static const uint16_t notes[6] = { 587, 659, 784, 880, 988, 1175 };
+  for (int i = 0; i < 6; i++) {
+    tone(BUZZER_PIN, notes[i]);
+    delay(90);
+    noTone(BUZZER_PIN);
+    if (i < 5) delay(30);
+  }
+#endif
+}
+#endif // FY_DIAG_BUILD
 
 static void macToStr(const uint8_t* mac, char* buf, size_t len) {
   snprintf(buf, len, "%02x:%02x:%02x:%02x:%02x:%02x",
@@ -2625,6 +2683,16 @@ static void heartbeatTick() {
 // ============================================================
 
 void setup() {
+#if FY_DIAG_BUILD
+  // M0: one beep before anything else proves we reached setup() at all.
+  // The buzzer pin is configured here because the shared pinMode below
+  // has not run yet (idempotent when it does).
+#if USE_BUZZER
+  pinMode(BUZZER_PIN, OUTPUT);
+  digitalWrite(BUZZER_PIN, LOW);
+#endif
+  diagBeepN(1);
+#endif
   Serial.begin(115200);
 #if !CYD_BUILD
   // Crucial for USB-optional operation: without this, Serial.write() will
@@ -2649,7 +2717,12 @@ void setup() {
   ledSet(false);
 #endif
 
+#if FY_DIAG_BUILD
+  // Startup chime is replaced by the M0..M5 milestone sequence above;
+  // the LED flash below still runs in both variants.
+#else
   startupBeep();
+#endif
 #if USE_LED
   ledFlash(200);
 #endif
@@ -2661,6 +2734,13 @@ void setup() {
   cydInit();
   bleFlockLastScanMs = 0;
 #endif
+#if FY_DIAG_BUILD
+  // M1: display + touch init returned. Paint RGB/black full-screen to
+  // prove the TFT bus by eye; the normal UI redraw happens later as usual
+  // (first loop() pass).
+  diagBeepN(2);
+  diagDisplayTest();
+#endif
 
   // SPIFFS — format on first boot if missing. Non-fatal if it fails.
   if (SPIFFS.begin(true)) {
@@ -2670,6 +2750,11 @@ void setup() {
   } else {
     dualPrintln("[flockyou] SPIFFS init FAILED — running without persistence");
   }
+#if FY_DIAG_BUILD
+  // M2: SPIFFS stage complete — beep fires on pass AND fail (persistence
+  // is non-fatal); boot continues either way.
+  diagBeepN(3);
+#endif
 
   WiFi.mode(WIFI_MODE_NULL);
   // Optimized WiFi init config — disables AMPDU, CSI, and NVS to reduce
@@ -2704,6 +2789,10 @@ void setup() {
   esp_wifi_set_storage(WIFI_STORAGE_RAM);
   esp_wifi_set_mode(WIFI_MODE_NULL);
   esp_wifi_start();
+#if FY_DIAG_BUILD
+  // M3: WiFi driver came up with the Marauder-minimal config.
+  diagBeepN(4);
+#endif
 
   applyInitialChannel();
 
@@ -2719,17 +2808,38 @@ void setup() {
   esp_wifi_set_promiscuous_filter(&filt);
   esp_wifi_set_promiscuous_rx_cb(&wifiSniffer);
   esp_wifi_set_promiscuous(true);
+#if FY_DIAG_BUILD
+  // M4: promiscuous sniffer armed.
+  diagBeepN(5);
+#endif
 
   dualPrintln("[flockyou] merged WiFi detector started");
   dualPrintf("[flockyou] mode=%s dwell_ms=%u start_channel=%u rssi_min=%d spiffs=%d\n",
                 channelModeName(), CHANNEL_DWELL_MS, currentChannel,
                 RSSI_MIN, fySpiffsReady ? 1 : 0);
+#if FY_DIAG_BUILD
+  // M5: victory tune — steady state reached, sniffer + UI + persistence
+  // are all up.
+  diagVictoryTune();
+#endif
 
   lastHeartbeat = millis();
   fyLastSaveAt  = millis();
 }
 
 void loop() {
+#if FY_DIAG_BUILD
+  // Still-alive metronome: one short B4 beep every 5 s while loop() runs.
+  // Distinct pitch from detection chirps and target heartbeat beeps;
+  // normal detection chirp behavior below is unchanged.
+  static unsigned long fyDiagLastMetroMs = 0;
+  if (millis() - fyDiagLastMetroMs >= DIAG_METRO_PERIOD_MS) {
+    fyDiagLastMetroMs = millis();
+#if USE_BUZZER
+    tone(BUZZER_PIN, DIAG_METRO_HZ); delay(DIAG_METRO_MS); noTone(BUZZER_PIN);
+#endif
+  }
+#endif
 #if FY_UI_BUILD
   cydSerialTick();
   cydBleDrainCommands();
