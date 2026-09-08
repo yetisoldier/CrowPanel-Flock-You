@@ -151,6 +151,8 @@ static const size_t SSID_KEYWORD_COUNT = sizeof(target_ssid_keywords) / sizeof(t
 #define FY_SESSION_FILE      "/session.json"
 #define FY_SESSION_TMP       "/session.tmp"
 #define FY_PREV_FILE         "/prev_session.json"
+#define FY_ROTATION_FILE     "/rotation"
+#define FY_ROTATION_TMP      "/rotation.tmp"
 #define AUTOSAVE_INTERVAL_MS 60000
 
 // ============================================================
@@ -358,6 +360,11 @@ static bool cydLastButtonState = HIGH;
 static uint8_t cydTftRotation = CYD_TFT_ROTATION;
 static unsigned long cydLastTouchMs = 0;
 static bool cydLastTouchDown = false;
+// Tap-vs-hold contact state: screen-cycle waits for release (so a hold
+// cannot cycle a screen first), hold fires once at FY_ROTATE_HOLD_MS.
+static unsigned long cydTouchDownAt = 0;   // contact start; 0 = no contact
+static bool cydTouchHoldFired = false;     // hold already handled this contact
+static bool cydTouchTapArmed = false;      // contact was a valid tap candidate
 static char cydLastMac[18] = "";
 static char cydLastMethod[20] = "";
 static int cydLastRssi = 0;
@@ -1588,6 +1595,44 @@ static void cydSetDisplayRotation(uint8_t rotation, bool redraw) {
   }
 }
 
+// --- Screen-rotation persistence (FYROTATE command) -----------------------
+// One ASCII digit ('0'..'3') in /rotation, stored with the session-save
+// pattern (tmp write -> read-back validation -> atomic promote). A missing
+// or corrupt file simply falls back to the compiled CYD_TFT_ROTATION
+// default — worst case is one boot at the default orientation, never a
+// boot failure — so the single-byte preference needs no tmp-file recovery.
+static bool fySaveRotation(uint8_t rotation) {
+  if (!fySpiffsReady) return false;
+
+  char digit = (char)('0' + (rotation % 4));
+  File f = SPIFFS.open(FY_ROTATION_TMP, "w");
+  if (!f) return false;
+  f.write((uint8_t)digit);
+  f.close();
+
+  File v = SPIFFS.open(FY_ROTATION_TMP, "r");
+  bool ok = v && v.available() == 1 && (char)v.read() == digit;
+  if (v) v.close();
+  if (!ok) return false;
+
+  SPIFFS.remove(FY_ROTATION_FILE);
+  return fyAtomicPromote(FY_ROTATION_TMP, FY_ROTATION_FILE);
+}
+
+// Returns the persisted rotation, or the compiled default when the file is
+// absent/corrupt or SPIFFS is down. Never fails.
+static uint8_t fyLoadRotation() {
+  if (!fySpiffsReady) return CYD_TFT_ROTATION;
+  File f = SPIFFS.open(FY_ROTATION_FILE, "r");
+  if (!f) return CYD_TFT_ROTATION;
+  int c = f.read();
+  f.close();
+  if (c < '0' || c > '3') return CYD_TFT_ROTATION;
+  dualPrintf("[flockyou] rotation %u restored from SPIFFS\n",
+             (unsigned)(c - '0'));
+  return (uint8_t)(c - '0');
+}
+
 static void cydButtonTick() {
 #if CYD_BUILD
   // CYD's boot button rotates the display. CrowPanel has no spare button
@@ -1606,32 +1651,81 @@ static void cydButtonTick() {
 #endif
 }
 
+// Touch gesture handling — tap and press-and-hold are mutually exclusive
+// per contact:
+//   - Finger down (debounced) arms a tap candidate and starts the hold
+//     timer; a flash overlay, if active, is dismissed and consumes the
+//     contact (a subsequent hold can rotate).
+//   - While down: when the contact age reaches FY_ROTATE_HOLD_MS, rotate to
+//     the next orientation ONCE (redraw + persist), disarm the tap, and
+//     mark the contact handled so the release does not also cycle screens.
+//   - Finger up before the threshold (and not held): the armed tap fires —
+//     the original screen-cycle behavior.
+// Each new contact starts a fresh hold timer; the debounce window gates
+// contact start only and never interacts with the hold timer itself.
 static void cydTouchTick() {
   bool down = boardTouchPressed();
   unsigned long now = millis();
-  if (down && !cydLastTouchDown && now - cydLastTouchMs > CYD_ROTATION_DEBOUNCE_MS) {
+
+  if (down && !cydLastTouchDown) {
+    // New contact: only accept it outside the debounce window.
+    if (now - cydLastTouchMs <= CYD_ROTATION_DEBOUNCE_MS) {
+      cydLastTouchDown = down;
+      return;
+    }
     cydLastTouchMs = now;
 
-    // If flash overlay is active, any touch dismisses it immediately
+    // If flash overlay is active, any touch dismisses it immediately and
+    // consumes the contact (existing behavior wins).
     if (cydFlashActive) {
       cydFlashActive = false;
       cydDrawUi(true);
       dualPrintf("[cyd] touch -> flash dismissed\n");
+      cydTouchDownAt = 0;
+      cydTouchHoldFired = false;
+      cydTouchTapArmed = false;
       cydLastTouchDown = down;
       return;
     }
 
-    cydScreen = (CydScreen)(((uint8_t)cydScreen + 1) % SCREEN_COUNT);
-    cydDrawUi(true);
+    cydTouchDownAt = now;
+    cydTouchHoldFired = false;
+    cydTouchTapArmed = true;  // tap candidate until the hold fires
+    cydLastTouchDown = down;
+    return;
+  }
+
+  if (down && cydLastTouchDown && cydTouchDownAt != 0 && !cydTouchHoldFired &&
+      now - cydTouchDownAt >= FY_ROTATE_HOLD_MS) {
+    // Hold threshold reached: rotate once, persist, disarm the tap.
+    cydTouchHoldFired = true;
+    cydTouchTapArmed = false;
+    cydSetDisplayRotation((cydTftRotation + 1) % 4, true);
+    bool saved = fySaveRotation(cydTftRotation);
+    dualPrintf("[cyd] touch hold -> rotation %u%s\n",
+               (unsigned)cydTftRotation, saved ? "" : " (save failed)");
+    cydLastTouchDown = down;
+    return;
+  }
+
+  if (!down && cydLastTouchDown) {
+    // Release: fire the screen-cycle tap only when the hold did not.
+    if (cydTouchTapArmed && !cydTouchHoldFired) {
+      cydScreen = (CydScreen)(((uint8_t)cydScreen + 1) % SCREEN_COUNT);
+      cydDrawUi(true);
 #if FY_TOUCH_XPT2046_BITBANG
-    // Preserve the CYD debug line verbatim (raw last sample, may be stale
-    // if the finger lifted mid-read — it was the same before the port).
-    dualPrintf("[cyd] touch -> screen %u x=%u y=%u z=%u\n",
-               (unsigned)cydScreen, (unsigned)cydTouchLastX,
-               (unsigned)cydTouchLastY, (unsigned)cydTouchLastZ);
+      // Preserve the CYD debug line verbatim (raw last sample, may be stale
+      // if the finger lifted mid-read — it was the same before the port).
+      dualPrintf("[cyd] touch -> screen %u x=%u y=%u z=%u\n",
+                 (unsigned)cydScreen, (unsigned)cydTouchLastX,
+                 (unsigned)cydTouchLastY, (unsigned)cydTouchLastZ);
 #else
-    dualPrintf("[cyd] touch -> screen %u\n", (unsigned)cydScreen);
+      dualPrintf("[cyd] touch -> screen %u\n", (unsigned)cydScreen);
 #endif
+    }
+    cydTouchDownAt = 0;
+    cydTouchHoldFired = false;
+    cydTouchTapArmed = false;
   }
   cydLastTouchDown = down;
 }
@@ -1783,6 +1877,24 @@ static void cydHandleCommand(char* line) {
   if (strcmp(line, "FYSCREEN,next") == 0) {
     cydScreen = (CydScreen)(((uint8_t)cydScreen + 1) % SCREEN_COUNT);
     cydDrawUi(true);
+    return;
+  }
+  if (strncmp(line, "FYROTATE", 8) == 0) {
+    const char* arg = line + 8;
+    uint8_t target;
+    if (strcmp(arg, ",next") == 0) {
+      target = (uint8_t)((cydTftRotation + 1) % 4);
+    } else if (arg[0] == ',' && arg[1] >= '0' && arg[1] <= '3' && arg[2] == '\0') {
+      target = (uint8_t)(arg[1] - '0');
+    } else {
+      dualPrintln("{\"event\":\"rotate_error\",\"error\":\"usage\","
+                 "\"usage\":\"FYROTATE,next | FYROTATE,<0-3>\"}");
+      return;
+    }
+    cydSetDisplayRotation(target, true);  // redraw=true repaints the UI
+    bool saved = fySaveRotation(cydTftRotation);
+    dualPrintf("{\"event\":\"rotate\",\"rotation\":%u,\"saved\":%s}\n",
+               (unsigned)cydTftRotation, saved ? "true" : "false");
     return;
   }
   if (strcmp(line, "FYTOUCH") == 0) {
@@ -2657,12 +2769,9 @@ void setup() {
   precompileOuis();
   memset(dedupeTable, 0, sizeof(dedupeTable));
 
-#if FY_UI_BUILD
-  cydInit();
-  bleFlockLastScanMs = 0;
-#endif
-
   // SPIFFS — format on first boot if missing. Non-fatal if it fails.
+  // Runs before cydInit() so a persisted FYROTATE orientation can be
+  // applied before the display is first configured.
   if (SPIFFS.begin(true)) {
     fySpiffsReady = true;
     dualPrintln("[flockyou] SPIFFS ready");
@@ -2670,6 +2779,14 @@ void setup() {
   } else {
     dualPrintln("[flockyou] SPIFFS init FAILED — running without persistence");
   }
+
+#if FY_UI_BUILD
+  // Apply the FYROTATE-persisted orientation (compiled CYD_TFT_ROTATION
+  // default when absent/invalid) before cydInit()'s first setRotation().
+  cydTftRotation = fyLoadRotation();
+  cydInit();
+  bleFlockLastScanMs = 0;
+#endif
 
   WiFi.mode(WIFI_MODE_NULL);
   // Optimized WiFi init config — disables AMPDU, CSI, and NVS to reduce
