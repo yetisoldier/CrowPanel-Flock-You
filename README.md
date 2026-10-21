@@ -7,6 +7,20 @@ Firmware for passive, human-reviewed Flock Safety / ALPR camera discovery, runni
 
 This fork ports the CYD firmware ([yetisoldier/CYD-Flock-You](https://github.com/yetisoldier/CYD-Flock-You)) to the CrowPanel. Port design: `docs/port/bob-port-design.md` (Bob) · verified hardware facts: `docs/port-research/scout-hardware-report.md`.
 
+## Quick Start (Installation)
+
+The easiest way to get started is using a web-based flasher:
+
+1. **Download** the `flockyou-crowpanel-full-0x0.bin` image from the [latest release](https://github.com/yetisoldier/CrowPanel-Flock-You/releases).
+2. **Connect** your CrowPanel to your computer via USB.
+3. **Flash** using a browser-based tool like **[esptool-js](https://espressif.github.io/esptool-js/)** or **[ESP Flasher](https://esp.huhn.me/)**.
+   - Select the serial port.
+   - Set the upload address/offset to **`0x0`**.
+   - Upload the `.bin` file and click Flash.
+4. **Verify**: Open a serial monitor at 115200 baud and type `FYHELLO`. You should receive a JSON status response.
+
+For those who prefer building from source, see the **Installation** section below.
+
 ## What It Does
 
 The CYD (Cheap Yellow Display / ESP32-2432S028R) passively monitors 2.4 GHz Wi-Fi traffic for known Flock-style RF signatures. When it detects a likely ALPR camera, it:
